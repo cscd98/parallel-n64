@@ -17,6 +17,7 @@
 #include "FrameBufferInfo.h"
 #include "Log.h"
 #include "MemoryStatus.h"
+#include "Stereo.h"
 
 #include "BufferCopy/ColorBufferToRDRAM.h"
 #include "BufferCopy/DepthBufferToRDRAM.h"
@@ -63,6 +64,7 @@ FrameBuffer::FrameBuffer()
 	m_pTexture = textureCache().addFrameBufferTexture(config.video.multisampling != 0 ?
 		textureTarget::TEXTURE_2D_MULTISAMPLE : textureTarget::TEXTURE_2D);
 	m_FBO = gfxContext.createFramebuffer();
+	m_eyes = 1;
 }
 
 FrameBuffer::~FrameBuffer()
@@ -79,11 +81,11 @@ FrameBuffer::~FrameBuffer()
 }
 
 static
-void _initFrameBufferTexture(u32 _address, u16 _width, u16 _height, f32 _scale, u16 _format, u16 _size, CachedTexture *_pTexture)
+void _initFrameBufferTexture(u32 _address, u16 _width, u16 _height, f32 _scale, u16 _format, u16 _size, CachedTexture *_pTexture, u32 _eyes)
 {
 	const FramebufferTextureFormats & fbTexFormats = gfxContext.getFramebufferTextureFormats();
 
-	_pTexture->width = (u16)(u32)(_width * _scale);
+	_pTexture->width = (u16)(u32)(_width * _scale * _eyes);
 	_pTexture->height = (u16)(u32)(_height * _scale);
 	_pTexture->format = _format;
 	_pTexture->size = _size;
@@ -108,7 +110,13 @@ void _initFrameBufferTexture(u32 _address, u16 _width, u16 _height, f32 _scale, 
 
 void FrameBuffer::_initTexture(u16 _width, u16 _height, u16 _format, u16 _size, CachedTexture *_pTexture)
 {
-	_initFrameBufferTexture(m_startAddress, _width, _height, m_scale, _format, _size, _pTexture);
+	const u32 eyes = (_pTexture == m_pSubTexture) ? 1U : m_eyes;
+	_initFrameBufferTexture(m_startAddress, _width, _height, m_scale, _format, _size, _pTexture, eyes);
+}
+
+u32 FrameBuffer::eyeWidth() const
+{
+	return m_pTexture->realWidth / m_eyes;
 }
 
 static
@@ -171,6 +179,9 @@ void FrameBuffer::init(u32 _address, u16 _format, u16 _size, u16 _width, bool _c
 //	m_height = VI.height;
 	m_size = _size;
 	updateEndAddress();
+	m_eyes = (Stereo::isActive() && !isAuxiliary() &&
+		config.frameBufferEmulation.enable != 0 &&
+		config.frameBufferEmulation.enableOverscan == 0) ? Stereo::eyes() : 1U;
 	if (isAuxiliary() && config.frameBufferEmulation.copyAuxToRDRAM != 0) {
 		m_scale = 1.0f;
 	} else if (config.frameBufferEmulation.nativeResFactor != 0 && config.frameBufferEmulation.enable != 0) {
@@ -391,8 +402,8 @@ CachedTexture * FrameBuffer::_getSubTexture(u32 _t)
 	s32 x0 = (s32)(m_pTexture->offsetS * m_scale);
 	s32 y0 = (s32)(m_pTexture->offsetT * m_scale);
 	s32 copyWidth = m_pSubTexture->realWidth;
-	if (x0 + copyWidth > m_pTexture->realWidth)
-		copyWidth = m_pTexture->realWidth - x0;
+	if (x0 + copyWidth > (s32)eyeWidth())
+		copyWidth = (s32)eyeWidth() - x0;
 	s32 copyHeight = m_pSubTexture->realHeight;
 	if (y0 + copyHeight > m_pTexture->realHeight)
 		copyHeight = m_pTexture->realHeight - y0;
@@ -1265,7 +1276,8 @@ void FrameBufferList::OverscanBuffer::setInputBuffer(const FrameBuffer *  _pBuff
 		_pBuffer->m_scale,
 		pSrcTexture->format,
 		pSrcTexture->size,
-		m_pTexture);
+		m_pTexture,
+		1);
 	_setAndAttachBufferTexture(m_FBO, m_pTexture, 0, false);
 	m_scale = _pBuffer->m_scale;
 	m_drawingWidth = m_bufferWidth = m_pTexture->width;
@@ -1478,20 +1490,18 @@ void FrameBufferList::renderBuffer()
 	}
 
 	m_overscan.activate();
-	gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+	if (pBuffer->m_eyes > 1)
+		gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 1.0f);
+	else
+		gfxContext.clearColorBuffer(0.0f, 0.0f, 0.0f, 0.0f);
+
+	const u32 eyes = pBuffer->m_eyes;
+	const s32 eyeDstWidth = static_cast<s32>(m_overscan.getBufferWidth());
 
 	GraphicsDrawer::BlitOrCopyRectParams blitParams;
-	blitParams.srcX0 = srcCoord[0];
-	blitParams.srcY0 = srcCoord[1];
-	blitParams.srcX1 = srcCoord[2];
-	blitParams.srcY1 = srcCoord[3];
 	blitParams.srcWidth = pBufferTexture->realWidth;
 	blitParams.srcHeight = pBufferTexture->realHeight;
-	blitParams.dstX0 = dstCoord[0];
-	blitParams.dstY0 = dstCoord[1];
-	blitParams.dstX1 = dstCoord[2];
-	blitParams.dstY1 = dstCoord[3];
-	blitParams.dstWidth = m_overscan.getBufferWidth();
+	blitParams.dstWidth = m_overscan.getBufferWidth() * eyes;
 	blitParams.dstHeight = m_overscan.getBufferHeight();
 	blitParams.filter = filter;
 	blitParams.mask = blitMask::COLOR_BUFFER;
@@ -1500,8 +1510,60 @@ void FrameBufferList::renderBuffer()
 	blitParams.readBuffer = readBuffer;
 	blitParams.invertY = config.frameBufferEmulation.enableOverscan == 0;
 
-	drawer.copyTexturedRect(blitParams);
+	// Sets the source and destination rectangles for one eye.
+	// x0..y1: destination as if the picture filled the eye frame (top-based pixels);
+	// sx0..sy1: the matching source rectangle in the frame buffer texture.
+	auto setEyeRect = [&](u32 eye, s32 x0, s32 x1, s32 y0, s32 y1,
+						  s32 sx0, s32 sx1, s32 sy0, s32 sy1) {
+		if (eyes < 2) {
+			blitParams.dstX0 = x0;  blitParams.dstX1 = x1;
+			blitParams.dstY0 = y0;  blitParams.dstY1 = y1;
+			blitParams.srcX0 = sx0; blitParams.srcX1 = sx1;
+			blitParams.srcY0 = sy0; blitParams.srcY1 = sy1;
+			return;
+		}
+		float L[4];
+		Stereo::eyeRect(eye, L);
+		const float bw = static_cast<float>(eyeDstWidth);
+		const float bh = static_cast<float>(m_overscan.getBufferHeight());
+		float dx0 = (L[0] + (x0 / bw) * (L[2] - L[0])) * bw;
+		float dx1 = (L[0] + (x1 / bw) * (L[2] - L[0])) * bw;
+		float dy0 = (L[1] + (y0 / bh) * (L[3] - L[1])) * bh;
+		float dy1 = (L[1] + (y1 / bh) * (L[3] - L[1])) * bh;
+		float fx0 = static_cast<float>(sx0), fx1 = static_cast<float>(sx1);
+		float fy0 = static_cast<float>(sy0), fy1 = static_cast<float>(sy1);
 
+		// Clip the destination to the eye frame and cut the source in step.
+		auto clip = [](float & d0, float & d1, float & s0, float & s1, float lo, float hi) {
+			const float dd = d1 - d0;
+			if (dd <= 0.0f)
+				return;
+			const float ss = s1 - s0;
+			if (d0 < lo) { s0 += (lo - d0) / dd * ss; d0 = lo; }
+			if (d1 > hi) { s1 -= (d1 - hi) / dd * ss; d1 = hi; }
+		};
+		clip(dx0, dx1, fx0, fx1, 0.0f, bw);
+		clip(dy0, dy1, fy0, fy1, 0.0f, bh);
+
+		blitParams.dstX0 = static_cast<s32>(floorf(dx0 + 0.5f)) + static_cast<s32>(eye) * eyeDstWidth;
+		blitParams.dstX1 = static_cast<s32>(floorf(dx1 + 0.5f)) + static_cast<s32>(eye) * eyeDstWidth;
+		blitParams.dstY0 = static_cast<s32>(floorf(dy0 + 0.5f));
+		blitParams.dstY1 = static_cast<s32>(floorf(dy1 + 0.5f));
+		blitParams.srcX0 = static_cast<s32>(floorf(fx0 + 0.5f));
+		blitParams.srcX1 = static_cast<s32>(floorf(fx1 + 0.5f));
+		blitParams.srcY0 = static_cast<s32>(floorf(fy0 + 0.5f));
+		blitParams.srcY1 = static_cast<s32>(floorf(fy1 + 0.5f));
+	};
+
+	// first buffer (always runs)
+	for (u32 eye = 0; eye < eyes; ++eye) {
+		const s32 srcShift = static_cast<s32>(eye) * static_cast<s32>(pBufferTexture->realWidth / eyes);
+		setEyeRect(eye, dstCoord[0], dstCoord[2], dstCoord[1], dstCoord[3],
+				   srcCoord[0] + srcShift, srcCoord[2] + srcShift, srcCoord[1], srcCoord[3]);
+		drawer.copyTexturedRect(blitParams);
+	}
+
+	// second buffer, only when the picture is split over two frame buffers
 	if (pNextBuffer != nullptr) {
 		pNextBuffer->m_isMainBuffer = true;
 		pFilteredBuffer = pNextBuffer;
@@ -1514,30 +1576,35 @@ void FrameBufferList::renderBuffer()
 			pFilteredBuffer->resolveMultisampledTexture();
 			readBuffer = pFilteredBuffer->m_resolveFBO;
 			pBufferTexture = pFilteredBuffer->m_pResolveTexture;
-		}
-		else {
+		} else {
 			readBuffer = pFilteredBuffer->m_FBO;
 			pBufferTexture = pFilteredBuffer->m_pTexture;
 		}
 
-		blitParams.srcY0 = 0;
-		blitParams.srcY1 = min((s32)(srcY1*srcScaleY), (s32)pFilteredBuffer->m_pTexture->realHeight);
 		blitParams.srcWidth = pBufferTexture->realWidth;
 		blitParams.srcHeight = pBufferTexture->realHeight;
-		blitParams.dstY0 = vOffset + (s32)(dstY0*dstScaleY);
-		blitParams.dstY1 = vOffset + (s32)(dstY1*dstScaleY);
-		blitParams.dstWidth = m_overscan.getBufferWidth();
-		blitParams.dstHeight = m_overscan.getBufferHeight();
 		blitParams.tex[0] = pBufferTexture;
 		blitParams.readBuffer = readBuffer;
 
-		drawer.copyTexturedRect(blitParams);
+		const u32 nextEyes = pNextBuffer->m_eyes;
+		const s32 nextSrcY0 = 0;
+		const s32 nextSrcY1 = min((s32)(srcY1*srcScaleY), (s32)pFilteredBuffer->m_pTexture->realHeight);
+		const s32 nextY0 = vOffset + (s32)(dstY0*dstScaleY);
+		const s32 nextY1 = vOffset + (s32)(dstY1*dstScaleY);
+		for (u32 eye = 0; eye < eyes; ++eye) {
+			const u32 e = (eye < nextEyes) ? eye : 0U;
+			const s32 srcShift = static_cast<s32>(e) * static_cast<s32>(pBufferTexture->realWidth / nextEyes);
+			setEyeRect(eye, dstCoord[0], dstCoord[2], nextY0, nextY1,
+					   srcCoord[0] + srcShift, srcCoord[2] + srcShift, nextSrcY0, nextSrcY1);
+			drawer.copyTexturedRect(blitParams);
+		}
 	}
 
 	gfxContext.bindFramebuffer(bufferTarget::READ_FRAMEBUFFER, ObjectHandle::defaultFramebuffer);
 	m_overscan.draw(vFullHeight, rdpRes.vi_ispal);
 
 	wnd.swapBuffers();
+	Stereo::endFrame();
 	if (m_pCurrent != nullptr) {
 		gfxContext.bindFramebuffer(bufferTarget::DRAW_FRAMEBUFFER, m_pCurrent->m_FBO);
 	}

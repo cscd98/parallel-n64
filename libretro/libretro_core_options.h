@@ -318,6 +318,22 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "disabled"
     },
+#ifdef HAVE_OPENGLES3
+    {
+        CORE_NAME "-vr-enable",
+        "VR Mode (RetroArch)",
+        NULL,
+        "Present the game in VR when RetroArch is running a headset session. With the GLideN64 renderer (HLE RSP, Framebuffer Emulation on, Overscan off) the game is rendered in stereo with depth; other renderers appear as a flat screen in VR space. Disabled asks the frontend for a flat presentation.",
+        NULL,
+        NULL,
+        {
+            { "disabled", NULL },
+            { "enabled",  NULL },
+            { NULL, NULL },
+        },
+        "disabled"
+    },
+#endif
     {
         CORE_NAME "-cpucore",
         "CPU Core",

@@ -49,6 +49,9 @@ struct FrameBuffer
 	bool m_readable;
 	bool m_copied;
 
+	u32 m_eyes;                 // 1, or 2 for a side-by-side stereo main buffer
+	u32 eyeWidth() const;       // pixel width of one eye in m_pTexture
+
 	struct {
 		u32 uls, ult;
 	} m_loadTileOrigin;

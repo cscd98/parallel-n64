@@ -27,9 +27,15 @@
 
 struct storage_backend_interface;
 
+#ifndef DEFAULT_MEMPAK_DEVICEID
 #define DEFAULT_MEMPAK_DEVICEID UINT16_C(0x0001)
+#endif
+#ifndef DEFAULT_MEMPAK_BANKS
 #define DEFAULT_MEMPAK_BANKS    UINT8_C(0x01)
+#endif
+#ifndef DEFAULT_MEMPAK_VERSION
 #define DEFAULT_MEMPAK_VERSION  UINT8_C(0x00)
+#endif
 
 struct mempak
 {

@@ -5,6 +5,7 @@
 #include <list>
 #include <chrono>
 #include <string>
+#include <vector>
 #include "gSP.h"
 #include "TexrectDrawer.h"
 #include "Graphics/ObjectHandle.h"
@@ -12,6 +13,7 @@
 
 namespace graphics {
 	class CombinerProgram;
+	class Context;
 }
 
 struct CachedTexture;
@@ -153,6 +155,7 @@ public:
 
 private:
 	friend class DisplayWindow;
+	friend struct StereoDraw;
 	friend TexrectDrawer;
 
 	GraphicsDrawer();
@@ -179,6 +182,12 @@ private:
 	bool _canDraw() const;
 	void _drawThickLine(u32 _v0, u32 _v1, float _width, u32 _flag);
 
+	void _applyEye(u32 _eye, bool _screenCoords) const;
+	bool _stereoBuffer() const;
+	void _drawRightEyeTriangles(const void* _params,
+        const SPVertex * _pSrc, bool _shear, bool _screenCoords);
+    void _drawRightEyeRects(const void* _params);
+
 	DrawingState m_drawingState;
 	TexturedRectParams m_texrectParams;
 
@@ -199,4 +208,6 @@ private:
 	bool m_bFlatColors;
 	bool m_bBGMode;
 	TexrectDrawer m_texrectDrawer;
+	mutable u32 m_eye = 0;
+	std::vector<SPVertex> m_eyeVertices;
 };
