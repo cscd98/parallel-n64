@@ -12,6 +12,7 @@
 #include <Graphics/Context.h>
 #include <Graphics/Parameters.h>
 #include "DisplayWindow.h"
+#include "Stereo.h"
 
 using namespace graphics;
 
@@ -116,7 +117,7 @@ void DepthBuffer::_initDepthBufferTexture(FrameBuffer * _pBuffer, CachedTexture 
 			_pTexture->width = dwnd().getWidth();
 			_pTexture->height = (u16)(u32)(maxHeight * dwnd().getScaleX());
 		} else {
-			_pTexture->width = VI.width * config.frameBufferEmulation.nativeResFactor;
+			_pTexture->width = VI.width * config.frameBufferEmulation.nativeResFactor * Stereo::eyes();
 			_pTexture->height = maxHeight * config.frameBufferEmulation.nativeResFactor;
 		}
 		_pTexture->address = gDP.depthImageAddress;
@@ -171,7 +172,7 @@ void DepthBuffer::_initDepthBufferRenderbuffer(FrameBuffer * _pBuffer)
 			m_depthRenderbufferWidth = dwnd().getWidth();
 			height = (u32)(VI_GetMaxBufferHeight(VI.width) * dwnd().getScaleX());
 		} else {
-			m_depthRenderbufferWidth = VI.width * config.frameBufferEmulation.nativeResFactor;
+			m_depthRenderbufferWidth = VI.width * config.frameBufferEmulation.nativeResFactor * Stereo::eyes(); // TODO
 			height = VI_GetMaxBufferHeight(VI.width) * config.frameBufferEmulation.nativeResFactor;
 		}
 	}

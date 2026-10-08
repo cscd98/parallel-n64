@@ -20,6 +20,7 @@
 #endif
 
 uint8_t* g_dd_disk;
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -892,6 +893,156 @@ extern struct rgba prescale[PRESCALE_WIDTH * PRESCALE_HEIGHT];
 /* The size of the angrylion frame last declared to the frontend. */
 static unsigned al_declared_w, al_declared_h;
 
+/* ---- VR / video views ------------------------------------------------ */
+#if defined(HAVE_GLIDEN64)
+extern int  gliden64SetStereo(int active, float separation);
+extern void gliden64DestroyGfxContext(void);
+extern void gliden64ReinitGfxContext(void);
+#endif
+
+#define VR_IPD_REFERENCE_M 0.063f
+#define VR_SEPARATION_NDC  0.04f   /* Stereo.cpp default, at the reference IPD */
+
+static bool     vr_user_enable = false;  /* the core option */
+static unsigned vr_status      = 0;      /* last GET_VIDEO_VIEWS_STATUS */
+static bool     vr_packed      = false;  /* frame is currently side-by-side stereo */
+static bool     vr_map_sent    = false;
+static float    vr_separation  = VR_SEPARATION_NDC;
+
+/* Stereo needs everything below to hold; otherwise a single view is sent. */
+static bool vr_stereo_capable(void)
+{
+   if(log_cb)
+      log_cb(RETRO_LOG_DEBUG, "vr_stereo_capable check: gfx_plugin %d gl_inited %d g_aleck64_enabled %d EnableFBEmulation %d EnableOverscan %d\n",
+         gfx_plugin, gl_inited, g_aleck64_enabled, EnableFBEmulation, EnableOverscan);
+#if defined(HAVE_GLIDEN64)
+   return gfx_plugin == GFX_GLIDEN64 && gl_inited && !g_aleck64_enabled
+       && EnableFBEmulation && !EnableOverscan;
+#else
+   return false;
+#endif
+}
+
+static unsigned vr_frame_width(void)
+{
+   return vr_packed ? screen_width * 2 : screen_width;
+}
+
+/* Size of one eye / the flat frame, as the renderer will actually present it. */
+static void vr_view_size(unsigned *w, unsigned *h)
+{
+   *w = screen_width;
+   *h = screen_height;
+#if defined(HAVE_PARALLEL)
+   if (gfx_plugin == GFX_PARALLEL && parallel_frame_width() && parallel_frame_height())
+   {
+      *w = parallel_frame_width();
+      *h = parallel_frame_height();
+   }
+#endif
+}
+
+/* Asked every retro_run, before the core draws. */
+static void vr_begin_frame(void)
+{
+   unsigned status = 0;
+   bool packed;
+
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_VIDEO_VIEWS_STATUS, &status))
+      status = 0;
+   vr_status = status;
+
+   packed = vr_user_enable && vr_stereo_capable()
+         && (status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS)
+         && (status & RETRO_VIDEO_VIEWS_STATUS_STEREO);
+
+   if (log_cb)
+         log_cb(RETRO_LOG_DEBUG, "vr_user_enable %d vr_stereo_capable %d vr_status 0x%x.\n",
+            vr_user_enable, vr_stereo_capable(), vr_status);
+
+   vr_separation = VR_SEPARATION_NDC;
+   if (packed && (status & RETRO_VIDEO_VIEWS_STATUS_HMD))
+   {
+      struct retro_vr_frame_state fs;
+      memset(&fs, 0, sizeof(fs));
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VR_FRAME_STATE, &fs))
+      {
+         float dx = fs.eyes[1].position[0] - fs.eyes[0].position[0];
+         float dy = fs.eyes[1].position[1] - fs.eyes[0].position[1];
+         float dz = fs.eyes[1].position[2] - fs.eyes[0].position[2];
+         float ipd = sqrtf(dx * dx + dy * dy + dz * dz);
+         if (ipd > 0.04f && ipd < 0.09f)
+            vr_separation = VR_SEPARATION_NDC * ipd / VR_IPD_REFERENCE_M;
+      }
+   }
+
+   if (packed != vr_packed)
+   {
+      vr_packed     = packed;
+      reinit_screen = true;   /* frame width changes */
+   }
+
+#if defined(HAVE_GLIDEN64)
+   /* Frame buffers must be rebuilt at the new width. Before the first frame
+    * there are none yet, so only the flag is set. */
+   if (gliden64SetStereo(packed, vr_separation) && !first_time)
+   {
+      gliden64DestroyGfxContext();
+      gliden64ReinitGfxContext();
+   }
+#endif
+}
+
+/* Sent every retro_run: an unchanged map costs the frontend a comparison, and
+ * resending covers state loads and run-ahead. */
+static void vr_send_views(void)
+{
+   struct retro_video_view  views[2];
+   struct retro_video_views map;
+   unsigned w, h;
+
+   memset(views, 0, sizeof(views));
+   memset(&map, 0, sizeof(map));
+
+   if (!(vr_status & RETRO_VIDEO_VIEWS_STATUS_PRESENTS))
+   {
+      if (vr_map_sent)   /* num_views 0 clears */
+      {
+         environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, &map);
+         vr_map_sent = false;
+      }
+      return;
+   }
+
+   vr_view_size(&w, &h);
+   views[0].x            = 0;
+   views[0].y            = 0;
+   views[0].width        = w;
+   views[0].height       = h;
+   views[0].screen       = 0;
+   views[0].aspect_ratio = (screen_aspectmodehint == 1) ? 16.0f / 9.0f : 0.0f;
+
+   if (vr_packed)
+   {
+      views[1]      = views[0];
+      views[0].eye  = RETRO_VIDEO_VIEW_EYE_LEFT;
+      views[1].eye  = RETRO_VIDEO_VIEW_EYE_RIGHT;
+      views[1].x    = w;
+      map.num_views = 2;
+   }
+   else
+   {
+      views[0].eye  = RETRO_VIDEO_VIEW_EYE_NONE;
+      map.num_views = 1;
+   }
+
+   map.views = views;
+   map.flags = vr_user_enable ? 0 : RETRO_VIDEO_VIEWS_FLAG_REQUEST_FLAT;
+
+   if (environ_cb(RETRO_ENVIRONMENT_SET_VIDEO_VIEWS, &map))
+      vr_map_sent = true;
+}
+
 /* RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER for angrylion: a
  * buffer of the frontend's own that the VI can render the frame into, so
  * that video_cb hands back the frontend's pointer and nothing is copied.
@@ -960,7 +1111,7 @@ static void present_frame(void)
             /* the E90 sprite chip draws mtetrisc's playfield; the hardware
              * renderers leave the frame on the GPU, so it is composited there */
             aleck64_e90_gl_draw(screen_width, screen_height);
-            video_cb(RETRO_HW_FRAME_BUFFER_VALID, screen_width, screen_height, 0);
+            video_cb(RETRO_HW_FRAME_BUFFER_VALID, vr_frame_width(), screen_height, 0);
 #elif defined(HAVE_THR_AL)
             video_cb((screen_pitch == 0) ? NULL : (screen_pixels ? screen_pixels : prescale), screen_width, screen_height, screen_pitch);
 #else
@@ -997,7 +1148,7 @@ void emu_step_render(void)
       present_frame();
    }
    else
-      video_cb(NULL, screen_width, screen_height, screen_pitch);
+      video_cb(NULL, vr_frame_width(), screen_height, screen_pitch);
 }
 
 #ifdef HAVE_PARALLEL
@@ -1251,17 +1402,22 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 {
    m64p_system_type region = rom_country_code_to_system_type(ROM_HEADER.Country_code);
 
-   info->geometry.base_width   = screen_width;
-   info->geometry.base_height  = screen_height;
-   /* The maximum only ever grows: a frame may not exceed it, and the
-    * frontend sizes its buffers from it. */
-   if (screen_width > declared_max_width)
-      declared_max_width       = screen_width;
-   if (screen_height > declared_max_height)
-      declared_max_height      = screen_height;
+   {
+      /* A VR user gets the doubled maximum declared up front, so entering
+       * stereo later is a SET_GEOMETRY and not a video-driver reinit. */
+      unsigned frame_w = vr_frame_width();
+      unsigned cap_w   = (vr_user_enable && vr_stereo_capable()) ? screen_width * 2 : frame_w;
+
+      info->geometry.base_width  = frame_w;
+      info->geometry.base_height = screen_height;
+      if (cap_w > declared_max_width)
+         declared_max_width      = cap_w;
+      if (screen_height > declared_max_height)
+         declared_max_height     = screen_height;
+   }
    info->geometry.max_width    = declared_max_width;
    info->geometry.max_height   = declared_max_height;
-   info->geometry.aspect_ratio = screen_aspect_ratio;
+   info->geometry.aspect_ratio = screen_aspect_ratio * (vr_packed ? 2.0f : 1.0f);
    /* Report the rate the VI is actually emulated at, not a constant.
     *
     * This was 60.13 for every NTSC title, with a "TODO: Actual timing" on
@@ -2245,6 +2401,11 @@ void update_variables(bool startup)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       mouse_wheel_down_btn = parse_mouse_button(var.value);
 
+   var.key = CORE_NAME "-vr-enable";
+   var.value = NULL;
+   vr_user_enable = environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value
+      && !strcmp(var.value, "enabled");
+
    var.key = "parallel-n64-gfxplugin-accuracy";
    var.value = NULL;
 
@@ -3217,6 +3378,9 @@ void retro_run (void)
    }
 
    FAKE_SDL_TICKS += 16;
+
+   vr_begin_frame();
+   vr_send_views();
 
    if (reinit_screen)
    {

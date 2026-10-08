@@ -18,6 +18,7 @@
 #include "Config.h"
 #include "RSP.h"
 #include "RDP.h"
+#include "Stereo.h"
 #include "VI.h"
 
 using namespace graphics;
@@ -195,6 +196,7 @@ void GraphicsDrawer::updateScissor(FrameBuffer * _pBuffer) const
 	DisplayWindow & wnd = DisplayWindow::get();
 	f32 scaleX, scaleY;
 	f32 offsetX = 0.0f, offsetY = 0.0f;
+	s32 eyeShift = 0;
 	if (_pBuffer == nullptr) {
 		scaleX = wnd.getScaleX();
 		scaleY = wnd.getScaleY();
@@ -203,6 +205,8 @@ void GraphicsDrawer::updateScissor(FrameBuffer * _pBuffer) const
 		scaleY = _pBuffer->m_scale;
 		offsetX = f32(_pBuffer->m_originX);
 		offsetY = f32(_pBuffer->m_originY);
+		if (m_eye != 0)
+			eyeShift = static_cast<s32>(_pBuffer->eyeWidth());
 	}
 
 	f32 SX0 = gDP.scissor.ulx + offsetX;
@@ -218,7 +222,7 @@ void GraphicsDrawer::updateScissor(FrameBuffer * _pBuffer) const
 	if (_needAdjustCoordinate(wnd))
 		_adjustScissorX(SX0, SX1, wnd.getAdjustScale());
 
-	gfxContext.setScissor(roundup(SX0, scaleX), roundup(SY0, scaleY),
+	gfxContext.setScissor(roundup(SX0, scaleX) + eyeShift, roundup(SY0, scaleY),
 		std::max(roundup(SX1 - SX0, scaleX), 0), std::max(roundup(SY1 - SY0, scaleY), 0));
 
 	gDP.changed &= ~CHANGED_SCISSOR;
@@ -253,7 +257,7 @@ void GraphicsDrawer::_updateViewport() const
 		Xf += f32(pCurrentBuffer->m_originX);
 		if (_needAdjustCoordinate(wnd))
 			Xf = _adjustViewportX(Xf);
-		const s32 X = roundup(Xf, scaleX);
+		const s32 X = roundup(Xf, scaleX) + (m_eye != 0 ? s32(pCurrentBuffer->eyeWidth()) : 0);
 		float Yf = gSP.viewport.vscale[1] < 0 ? (gSP.viewport.y + gSP.viewport.vscale[1] * 2.0f) : gSP.viewport.y;
 		Yf += f32(pCurrentBuffer->m_originY);
 		const s32 Y = roundup(Yf, scaleY);
@@ -280,7 +284,7 @@ void GraphicsDrawer::_updateScreenCoordsViewport(const FrameBuffer * _pBuffer) c
 		bufferWidth = pCurrentBuffer->m_width;
 		bufferHeight = VI_GetMaxBufferHeight(bufferWidth);
 		viewportScaleX = viewportScaleY = pCurrentBuffer->m_scale;
-		X = roundup(f32(pCurrentBuffer->m_originX), viewportScaleX);
+		X = roundup(f32(pCurrentBuffer->m_originX), viewportScaleX) + (m_eye != 0 ? s32(pCurrentBuffer->eyeWidth()) : 0);
 		Y = roundup(f32(pCurrentBuffer->m_originY), viewportScaleY);
 	}
 
@@ -730,6 +734,51 @@ bool GraphicsDrawer::_canDraw() const
 	return config.frameBufferEmulation.enable == 0 || frameBufferList().getCurrent() != nullptr;
 }
 
+bool GraphicsDrawer::_stereoBuffer() const
+{
+	const FrameBuffer * pBuffer = frameBufferList().getCurrent();
+	return pBuffer != nullptr && pBuffer->m_eyes > 1;
+}
+
+// Switches viewport and scissor to the given eye. Switching back to eye 0 leaves exactly the
+// state the left-eye draw used, so the dirty flags stay consistent.
+void GraphicsDrawer::_applyEye(u32 _eye, bool _screenCoords) const
+{
+	m_eye = _eye;
+	if (_screenCoords)
+		_updateScreenCoordsViewport();
+	else
+		_updateViewport();
+	updateScissor(frameBufferList().getCurrent());
+}
+
+void GraphicsDrawer::_drawRightEyeTriangles(const void* _paramsPtr,
+    const SPVertex * _pSrc, bool _shear, bool _screenCoords)
+{
+    const auto& _params = *static_cast<const graphics::Context::DrawTriangleParameters*>(_paramsPtr);
+	if (!_stereoBuffer())
+		return;
+	Context::DrawTriangleParameters params(_params);
+	if (_shear) {
+		m_eyeVertices.assign(_pSrc, _pSrc + _params.verticesCount);
+		Stereo::shearForRightEye(m_eyeVertices.data(), _params.verticesCount);
+		params.vertices = m_eyeVertices.data();
+	}
+	_applyEye(1, _screenCoords);
+	gfxContext.drawTriangles(params);
+	_applyEye(0, _screenCoords);
+}
+
+void GraphicsDrawer::_drawRightEyeRects(const void* _paramsPtr)
+{
+    const auto& _params = *static_cast<const graphics::Context::DrawRectParameters*>(_paramsPtr);
+	if (!_stereoBuffer())
+		return;
+	_applyEye(1, true);
+	gfxContext.drawRects(_params);
+	_applyEye(0, true);
+}
+
 void GraphicsDrawer::drawTriangles()
 {
 	if (triangles.num == 0 || !_canDraw()) {
@@ -738,6 +787,7 @@ void GraphicsDrawer::drawTriangles()
 		return;
 	}
 
+	const bool xyModified = (m_modifyVertices & MODIFY_XY) != 0;     // before _prepareDrawTriangle()
 	_prepareDrawTriangle();
 
 	Context::DrawTriangleParameters triParams;
@@ -750,6 +800,7 @@ void GraphicsDrawer::drawTriangles()
 	triParams.elements = triangles.elements.data();
 	triParams.combiner = currentCombiner();
 	gfxContext.drawTriangles(triParams);
+	_drawRightEyeTriangles(&triParams, triangles.vertices.data(), true, xyModified);
 
 	if (config.frameBufferEmulation.enable != 0) {
 		const f32 maxY = renderTriangles(triangles.vertices.data(), triangles.elements.data(), triangles.num);
@@ -790,6 +841,7 @@ void GraphicsDrawer::drawScreenSpaceTriangle(u32 _numVtx, graphics::DrawModePara
 	triParams.vertices = m_dmaVertices.data();
 	triParams.combiner = currentCombiner();
 	gfxContext.drawTriangles(triParams);
+	_drawRightEyeTriangles(&triParams, m_dmaVertices.data(), false, true);
 	m_dmaVerticesNum = 0;
 
 	frameBufferList().setBufferChanged(maxY);
@@ -800,8 +852,9 @@ void GraphicsDrawer::drawDMATriangles(u32 _numVtx)
 {
 	if (_numVtx == 0 || !_canDraw())
 		return;
-	_prepareDrawTriangle();
 
+	const bool xyModified = (m_modifyVertices & MODIFY_XY) != 0;
+	_prepareDrawTriangle();
 
 	Context::DrawTriangleParameters triParams;
 	triParams.mode = drawmode::TRIANGLES;
@@ -810,6 +863,7 @@ void GraphicsDrawer::drawDMATriangles(u32 _numVtx)
 	triParams.vertices = m_dmaVertices.data();
 	triParams.combiner = currentCombiner();
 	gfxContext.drawTriangles(triParams);
+	_drawRightEyeTriangles(&triParams, m_dmaVertices.data(), true, xyModified);
 	m_dmaVerticesNum = 0;
 
 	if (config.frameBufferEmulation.enable != 0) {
@@ -931,6 +985,14 @@ void GraphicsDrawer::drawLine(u32 _v0, u32 _v1, float _width, u32 _flag)
 
 	SPVertex vertexBuf[2] = { triangles.vertices[_v0], triangles.vertices[_v1] };
 	gfxContext.drawLine(lineWidth, vertexBuf);
+	if (_stereoBuffer()) {
+		SPVertex rightBuf[2] = { vertexBuf[0], vertexBuf[1] };
+		Stereo::shearForRightEye(rightBuf, 2);
+		const bool sc = (vertexBuf[0].modify & MODIFY_XY) != 0;
+		_applyEye(1, sc);
+		gfxContext.drawLine(lineWidth, rightBuf);
+		_applyEye(0, sc);
+	}
 }
 
 void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
@@ -986,6 +1048,7 @@ void GraphicsDrawer::drawRect(int _ulx, int _uly, int _lrx, int _lry)
 	rectParams.vertices = m_rect;
 	rectParams.combiner = currentCombiner();
 	gfxContext.drawRects(rectParams);
+	_drawRightEyeRects(&rectParams);
 	gSP.changed |= CHANGED_GEOMETRYMODE | CHANGED_VIEWPORT;
 }
 
@@ -1165,14 +1228,14 @@ void GraphicsDrawer::drawTexturedRect(const TexturedRectParams & _params)
 	DisplayWindow & wnd = dwnd();
 	TextureCache & cache = textureCache();
 	const bool bUseBilinear = gDP.otherMode.textureFilter != 0;
-	const bool bUseTexrectDrawer = m_bBGMode || ((config.graphics2D.enableNativeResTexrects != 0)
+	const bool bUseTexrectDrawer = !_stereoBuffer() && (m_bBGMode || ((config.graphics2D.enableNativeResTexrects != 0)
 		&& bUseBilinear
 		&& pCurrentCombiner->usesTexture()
 		&& (pCurrentBuffer == nullptr || !pCurrentBuffer->m_cfb)
 		&& (cache.current[0] != nullptr)
 		//		&& (cache.current[0] == nullptr || cache.current[0]->format == G_IM_FMT_RGBA || cache.current[0]->format == G_IM_FMT_CI)
 		&& ((cache.current[0]->frameBufferTexture == CachedTexture::fbNone && !cache.current[0]->bHDTexture))
-		&& (cache.current[1] == nullptr || (cache.current[1]->frameBufferTexture == CachedTexture::fbNone && !cache.current[1]->bHDTexture)));
+		&& (cache.current[1] == nullptr || (cache.current[1]->frameBufferTexture == CachedTexture::fbNone && !cache.current[1]->bHDTexture))));
 
 	f32 scaleX, scaleY;
 	calcCoordsScales(pCurrentBuffer, scaleX, scaleY);
@@ -1363,6 +1426,7 @@ void GraphicsDrawer::drawTexturedRect(const TexturedRectParams & _params)
 	rectParams.vertices = m_rect;
 	rectParams.combiner = currentCombiner();
 	gfxContext.drawRects(rectParams);
+	_drawRightEyeRects(&rectParams);
 
 	gSP.changed |= CHANGED_GEOMETRYMODE | CHANGED_VIEWPORT;
 }
