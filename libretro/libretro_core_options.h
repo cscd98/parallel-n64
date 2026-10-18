@@ -2240,6 +2240,50 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "0"
     },
+    {
+        CORE_NAME "-vr-aim-controller",
+        "VR Aim Controller to Stick",
+        NULL,
+        "(GLideN64) Map the pointing direction of a VR motion controller to the N64 analog stick, for aiming in games like GoldenEye. Pointing straight ahead is neutral; the real stick takes over whenever it is moved. Needs a headset session.",
+        "Map the pointing direction of a VR motion controller to the N64 analog stick, for aiming in games like GoldenEye. Pointing straight ahead is neutral; the real stick takes over whenever it is moved. Needs a headset session.",
+        "vr",
+        {
+            {"off", "Off"},
+            {"left", "Left Controller"},
+            {"right", "Right Controller"},
+            { NULL, NULL },
+        },
+        "off"
+    },
+    {
+        CORE_NAME "-vr-aim-range",
+        "VR Aim Range (degrees)",
+        NULL,
+        "(GLideN64) How far the controller must point away from neutral for full stick deflection. Smaller is more sensitive.",
+        "How far the controller must point away from neutral for full stick deflection. Smaller is more sensitive.",
+        "vr",
+        {
+            {"10", NULL}, {"15", NULL}, {"20", NULL}, {"25", NULL},
+            {"30", NULL}, {"40", NULL}, {"50", NULL},
+            { NULL, NULL },
+        },
+        "25"
+    },
+    {
+        CORE_NAME "-vr-aim-offset",
+        "VR Aim Vertical Offset (degrees)",
+        NULL,
+        "(GLideN64) Moves the neutral point of VR aiming up (positive) or down (negative), so a comfortably held controller reads as centered.",
+        "Moves the neutral point of VR aiming up (positive) or down (negative), so a comfortably held controller reads as centered.",
+        "vr",
+        {
+            {"-30", NULL}, {"-25", NULL}, {"-20", NULL}, {"-15", NULL}, {"-10", NULL}, {"-5", NULL},
+            {"0", NULL},
+            {"5", NULL}, {"10", NULL}, {"15", NULL}, {"20", NULL}, {"25", NULL}, {"30", NULL},
+            { NULL, NULL },
+        },
+        "0"
+    },
 #endif
     {
         CORE_NAME "-OverrideSaveType",

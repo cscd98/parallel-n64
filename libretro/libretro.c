@@ -1671,6 +1671,75 @@ static float vr_forward_yaw(const float q[4])
    return atan2f(-fx, -fz);
 }
 
+/* VR aim: a controller's pointing direction drives the N64 stick */
+static int   vr_aim_hand  = -1;                    /* -1 off, else enum retro_vr_hand */
+static float vr_aim_range = 25.0f * 0.01745329252f; /* radians for full deflection */
+static bool  vr_aim_valid = false;
+static float vr_aim_x, vr_aim_y;                   /* -1..1, +x right, +y up */
+static float vr_aim_offset = 0.0f;   /* radians; positive moves neutral up */
+
+static float vr_forward_pitch(const float q[4])
+{
+   float fy = -2.0f * (q[1] * q[2] - q[0] * q[3]);
+   if (fy >  1.0f) fy =  1.0f;
+   if (fy < -1.0f) fy = -1.0f;
+   return asinf(fy);
+}
+
+static float vr_wrap_angle(float a)
+{
+   while (a >  3.14159265f) a -= 6.28318531f;
+   while (a < -3.14159265f) a += 6.28318531f;
+   return a;
+}
+
+/* Sampled once per retro_run, before the CPU runs and reads input */
+static void vr_aim_update(void)
+{
+   static struct retro_vr_controller_poses poses;
+   const struct retro_vr_hand_state *hand;
+   float ref_yaw = 0.0f, ref_pitch = 0.0f, x, y;
+
+   vr_aim_valid = false;
+   if (vr_aim_hand < 0 || !environ_cb(RETRO_ENVIRONMENT_GET_VR_CONTROLLER_POSES, &poses))
+      return;
+
+   hand = &poses.hands[vr_aim_hand];
+   if (!(hand->flags & RETRO_VR_HAND_ACTIVE) ||
+       !(hand->aim.flags & RETRO_VR_POSE_ORIENTATION_VALID))
+      return;
+
+   /* Immersive: the game camera follows the head, so neutral is where the
+    * head looks. Otherwise neutral is straight ahead of the recenter. */
+   if (VRMode == VR_MODE_IMMERSIVE)
+   {
+      struct retro_vr_head_pose head;
+      if (!environ_cb(RETRO_ENVIRONMENT_GET_VR_HEAD_POSE, &head) ||
+          !(head.flags & RETRO_VR_HEAD_POSE_ORIENTATION_VALID))
+         return;
+      ref_yaw   = vr_forward_yaw(head.orientation);
+      ref_pitch = vr_forward_pitch(head.orientation);
+   }
+
+   /* yaw is positive to the left, the stick's +x is right */
+   x = -vr_wrap_angle(vr_forward_yaw(hand->aim.orientation) - ref_yaw) / vr_aim_range;
+   y = (vr_forward_pitch(hand->aim.orientation) - ref_pitch - vr_aim_offset) / vr_aim_range;
+
+   vr_aim_x = (x >  1.0f) ?  1.0f : (x < -1.0f) ? -1.0f : x;
+   vr_aim_y = (y >  1.0f) ?  1.0f : (y < -1.0f) ? -1.0f : y;
+   vr_aim_valid = true;
+}
+
+/* For the input plugin: true when a VR aim sample is available this frame */
+bool libretro_vr_aim_stick(float *x, float *y)
+{
+   if (!vr_aim_valid)
+      return false;
+   *x = vr_aim_x;
+   *y = vr_aim_y;
+   return true;
+}
+
 /* Reads the eye poses for immersive mode. The frontend shows its next frame
  * with the poses read last, so they are read only when GLideN64 starts a
  * picture with them. */
@@ -1829,6 +1898,28 @@ static void vr_update_variables(bool startup)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       VRImmersiveDistance = atoi(var.value) / 100.0f;
 
+   var.key = CORE_NAME "-vr-aim-controller";
+   var.value = NULL;
+   vr_aim_hand = -1;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "left"))
+         vr_aim_hand = RETRO_VR_HAND_LEFT;
+      else if (!strcmp(var.value, "right"))
+         vr_aim_hand = RETRO_VR_HAND_RIGHT;
+   }
+
+   var.key = CORE_NAME "-vr-aim-range";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      vr_aim_range = atoi(var.value) * 0.01745329252f;
+
+   var.key = CORE_NAME "-vr-aim-offset";
+   var.value = NULL;
+   vr_aim_offset = 0.0f;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      vr_aim_offset = atoi(var.value) * 0.01745329252f;
+
    if (!startup && gfx_plugin == GFX_GLIDEN64)
       gln64_vr_update_config();
 
@@ -1854,6 +1945,8 @@ void libretro_vr_immersive_present(int pose)
 {
    vr_presented_pose = pose;
 }
+#else
+bool libretro_vr_aim_stick(float *x, float *y) { return false; }
 #endif /* HAVE_GLIDEN64 */
 
 void update_variables(bool startup)
@@ -3324,6 +3417,7 @@ void retro_unload_game(void)
     vr_reference_set  = false;
     vr_presented_pose = 0;
     vr_pose_valid     = false;
+    vr_aim_valid      = false;
 #endif
 }
 
@@ -3539,6 +3633,10 @@ void retro_run (void)
          EmuThreadInit();
       }
       
+#ifdef HAVE_GLIDEN64
+      vr_aim_update();
+#endif
+
       EmuThreadStep();
 
       switch (gfx_plugin)

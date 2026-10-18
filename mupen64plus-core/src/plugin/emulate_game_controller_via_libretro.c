@@ -56,6 +56,7 @@ extern int mouse_right_btn;
 extern int mouse_middle_btn;
 extern int mouse_wheel_up_btn;
 extern int mouse_wheel_down_btn;
+extern bool libretro_vr_aim_stick(float *x, float *y);
 static bool libretro_supports_bitmasks = false;
 
 extern m64p_rom_header ROM_HEADER;
@@ -517,6 +518,20 @@ static void inputGetKeys_reuse(int16_t analogX, int16_t analogY, int Control, BU
    analog_scale(analogX, analogY, 80, &sx, &sy);
    Keys->X_AXIS = sx;
    Keys->Y_AXIS = sy;
+
+   /* VR aim: a motion controller's pointing direction drives the stick
+    * (player 1 only) whenever the real stick is neutral. Sits after the
+    * deadzone/snap scaling on purpose: the aim range option already scales
+    * it, and snapping to 45 degree multiples would fight smooth aiming. */
+   if (Control == 0 && Keys->X_AXIS == 0 && Keys->Y_AXIS == 0)
+   {
+      float vx, vy;
+      if (libretro_vr_aim_stick(&vx, &vy))
+      {
+         Keys->X_AXIS = (int)(vx * 80.0f);
+         Keys->Y_AXIS = -(int)(vy * 80.0f);
+      }
+   }
 
    /* Mouse-to-analog-stick mode (player 1 only): the mouse drives the
     * stick whenever the real stick is neutral. Deltas are scaled by
