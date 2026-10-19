@@ -28,6 +28,7 @@
 #include <libretro.h>
 #include <stdio.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 /* snprintf not available in MSVC 2010 and earlier */
@@ -56,6 +57,7 @@ extern int mouse_right_btn;
 extern int mouse_middle_btn;
 extern int mouse_wheel_up_btn;
 extern int mouse_wheel_down_btn;
+extern bool libretro_vr_aim_stick(float *x, float *y);
 static bool libretro_supports_bitmasks = false;
 
 extern m64p_rom_header ROM_HEADER;
@@ -517,6 +519,26 @@ static void inputGetKeys_reuse(int16_t analogX, int16_t analogY, int Control, BU
    analog_scale(analogX, analogY, 80, &sx, &sy);
    Keys->X_AXIS = sx;
    Keys->Y_AXIS = sy;
+
+   /* VR laser aim (player 1 only): the controller's pointer drives the stick
+    * whenever the real stick is neutral. The value is clamped to a circle
+    * and scaled to the N64 stick's range. */
+   if (Control == 0 && Keys->X_AXIS == 0 && Keys->Y_AXIS == 0)
+   {
+      float ax, ay, len2;
+      if (libretro_vr_aim_stick(&ax, &ay))
+      {
+         len2 = ax * ax + ay * ay;
+         if (len2 > 1.0f)
+         {
+            float inv = 1.0f / sqrtf(len2);
+            ax *= inv;
+            ay *= inv;
+         }
+         Keys->X_AXIS = (int)(ax * 80.0f);
+         Keys->Y_AXIS = (int)(ay * 80.0f);
+      }
+   }
 
    /* Mouse-to-analog-stick mode (player 1 only): the mouse drives the
     * stick whenever the real stick is neutral. Deltas are scaled by

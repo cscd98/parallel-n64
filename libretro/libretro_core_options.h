@@ -2240,6 +2240,35 @@ struct retro_core_option_v2_definition option_defs_us[] = {
         },
         "0"
     },
+    {
+        CORE_NAME "-vr-aim-controller",
+        "VR Laser Pointer Aim",
+        NULL,
+        "(GLideN64) Aim with a VR motion controller like a laser pointer. This drives the N64 analog stick. Needs a headset session.",
+        "Aim with a VR motion controller like a laser pointer. This drives the N64 analog stick. Needs a headset session.",
+        "vr",
+        {
+            {"off", "Off"},
+            {"left", "Left Controller"},
+            {"right", "Right Controller"},
+            { NULL, NULL },
+        },
+        "off"
+    },
+    {
+        CORE_NAME "-vr-aim-invert-y",
+        "VR Laser Pointer Invert Y",
+        NULL,
+        "(GLideN64) Invert the vertical axis of laser pointer aim: pointing up aims down and the reverse. Only used while VR Laser Pointer Aim is set to a controller.",
+        "Invert the vertical axis of laser pointer aim: pointing up aims down and the reverse. Only used while VR Laser Pointer Aim is set to a controller.",
+        "vr",
+        {
+            {"off", "Off"},
+            {"on", "On"},
+            { NULL, NULL },
+        },
+        "off"
+    },
 #endif
     {
         CORE_NAME "-OverrideSaveType",

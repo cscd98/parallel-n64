@@ -277,6 +277,15 @@ static float    vr_reference_yaw    = 0.0f;
 static int      vr_presented_pose   = 0;
 static bool vr_present_as_dupe(void);
 static void vr_set_views(void);
+/* VR laser aim: the chosen hand's ray, cast onto a plane in front of the
+ * head, drives the thumbstick */
+static int   vr_aim_hand  = -1;    /* -1 off, else enum retro_vr_hand */
+static bool  vr_aim_valid = false;
+static float vr_aim_x     = 0.0f;  /* -1..1, +x right */
+static float vr_aim_y     = 0.0f;  /* -1..1, +y up    */
+#define VR_AIM_DISTANCE 2.0f                  /* meters to the virtual screen */
+#define VR_AIM_RANGE    (30.0f * 0.01745329252f) /* radians for full deflection */
+static bool  vr_aim_invert_y = false;
 #endif
 enum audio_rsp_mode_t audio_rsp_mode = AUDIO_RSP_FOLLOW;
 /* Set from the ROM header for titles whose audio microcode use cannot be
@@ -1829,6 +1838,23 @@ static void vr_update_variables(bool startup)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
       VRImmersiveDistance = atoi(var.value) / 100.0f;
 
+   var.key = CORE_NAME "-vr-aim-controller";
+   var.value = NULL;
+   vr_aim_hand = -1;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "left"))
+         vr_aim_hand = RETRO_VR_HAND_LEFT;
+      else if (!strcmp(var.value, "right"))
+         vr_aim_hand = RETRO_VR_HAND_RIGHT;
+   }
+
+   var.key = CORE_NAME "-vr-aim-invert-y";
+   var.value = NULL;
+   vr_aim_invert_y = false;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+      vr_aim_invert_y = !strcmp(var.value, "on");
+
    if (!startup && gfx_plugin == GFX_GLIDEN64)
       gln64_vr_update_config();
 
@@ -1854,6 +1880,71 @@ void libretro_vr_immersive_present(int pose)
 {
    vr_presented_pose = pose;
 }
+/* Sampled once per retro_run, before the CPU runs and reads input. The hand's
+ * ray is cast onto a plane VR_AIM_DISTANCE in front of the head and the dot's
+ * angles, seen from the head, become the stick. Neutral is fixed straight
+ * ahead of the recenter (-Z), so turning the head does not move it; only the
+ * head's position is used, as the origin of the angles. */
+static void vr_aim_update(void)
+{
+   static struct retro_vr_controller_poses poses;
+   struct retro_vr_head_pose head;
+   const struct retro_vr_hand_state *hand;
+   const float *q, *p;
+   float dx, dy, dz, t, x, y;
+
+   vr_aim_valid = false;
+   if (vr_aim_hand < 0 ||
+       !environ_cb(RETRO_ENVIRONMENT_GET_VR_CONTROLLER_POSES, &poses))
+      return;
+
+   hand = &poses.hands[vr_aim_hand];
+   if (!(hand->flags & RETRO_VR_HAND_ACTIVE) ||
+       !(hand->aim.flags & RETRO_VR_POSE_ORIENTATION_VALID) ||
+       !(hand->aim.flags & RETRO_VR_POSE_POSITION_VALID))
+      return;
+
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_VR_HEAD_POSE, &head) ||
+       !(head.flags & RETRO_VR_HEAD_POSE_POSITION_VALID))
+      return;
+
+   /* ray direction: -Z rotated by the aim orientation (x, y, z, w) */
+   q  = hand->aim.orientation;
+   p  = hand->aim.position;
+   dx = -2.0f * (q[0] * q[2] + q[1] * q[3]);
+   dy = -2.0f * (q[1] * q[2] - q[0] * q[3]);
+   dz = -(1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1]));
+
+   if (dz > -0.05f)   /* pointing sideways or backwards */
+      return;
+
+   /* the plane is z = head.z - distance */
+   t = (head.position[2] - VR_AIM_DISTANCE - p[2]) / dz;
+   if (t <= 0.0f)
+      return;
+
+   x = atan2f(p[0] + t * dx - head.position[0], VR_AIM_DISTANCE) / VR_AIM_RANGE;
+   y = atan2f(p[1] + t * dy - head.position[1], VR_AIM_DISTANCE) / VR_AIM_RANGE;
+
+   if (vr_aim_invert_y)
+      y = -y;
+
+   vr_aim_x = (x >  1.0f) ?  1.0f : (x < -1.0f) ? -1.0f : x;
+   vr_aim_y = (y >  1.0f) ?  1.0f : (y < -1.0f) ? -1.0f : y;
+   vr_aim_valid = true;
+}
+
+/* For the input plugin: true when a laser aim sample exists this frame */
+bool libretro_vr_aim_stick(float *x, float *y)
+{
+   if (!vr_aim_valid)
+      return false;
+   *x = vr_aim_x;
+   *y = vr_aim_y;
+   return true;
+}
+#else
+bool libretro_vr_aim_stick(float *x, float *y) { return false; }
 #endif /* HAVE_GLIDEN64 */
 
 void update_variables(bool startup)
@@ -3324,6 +3415,7 @@ void retro_unload_game(void)
     vr_reference_set  = false;
     vr_presented_pose = 0;
     vr_pose_valid     = false;
+    vr_aim_valid      = false;
 #endif
 }
 
@@ -3539,6 +3631,10 @@ void retro_run (void)
          EmuThreadInit();
       }
       
+#ifdef HAVE_GLIDEN64
+      vr_aim_update();
+#endif
+
       EmuThreadStep();
 
       switch (gfx_plugin)
